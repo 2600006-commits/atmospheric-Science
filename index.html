@@ -17,7 +17,7 @@
 <div class="max-w-7xl mx-auto px-4 py-8">
     <header class="mb-8">
         <h1 class="text-3xl font-bold text-blue-900">Meteorological Data Analyzer</h1>
-        <p class="text-slate-500 mt-2">HGT 및 SLP 파일 기상청 일기도 스타일 시각화</p>
+        <p class="text-slate-500 mt-2">HGT 및 SLP 데이터 기상청 표준 일기도 시각화</p>
     </header>
 
     <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -98,7 +98,17 @@
         document.getElementById('levelSelect').style.display = type === 'HGT' ? 'block' : 'none';
     }
 
-    // 1. 세계 지도 윤곽선 불러오기
+    // 배열 평탄화 함수 (다차원 배열이 들어올 경우 강제로 1차원으로 풀기)
+    function flattenArray(arr) {
+        if (!arr || typeof arr !== 'object') return [];
+        let flat = [];
+        for (let i = 0; i < arr.length; i++) {
+            flat.push(Number(arr[i]));
+        }
+        return flat;
+    }
+
+    // 지도 데이터 로드
     async function fetchMapLine() {
         if (mapTraceData) return mapTraceData;
         try {
@@ -111,7 +121,7 @@
                     let prevLon = null;
                     poly.forEach(coord => {
                         let lon = coord[0];
-                        if (lon < 0) lon += 360; 
+                        if (lon < 0) lon += 360; // 경도 0~360 매핑
                         if (prevLon !== null && Math.abs(lon - prevLon) > 180) {
                             mapX.push(null); mapY.push(null);
                         }
@@ -124,15 +134,13 @@
                 else if(f.geometry.type === 'MultiPolygon') f.geometry.coordinates.forEach(m => m.forEach(extractPoly));
             });
 
-            mapTraceData = { x: mapX, y: mapY, type: 'scatter', mode: 'lines', line: { color: '#475569', width: 1.2 }, hoverinfo: 'none', showlegend: false };
+            mapTraceData = { x: mapX, y: mapY, type: 'scatter', mode: 'lines', line: { color: '#334155', width: 1.5 }, hoverinfo: 'none', showlegend: false };
             return mapTraceData;
         } catch (e) {
-            console.warn("지도 로드 실패", e);
             return null;
         }
     }
 
-    // 2. 변수 탐색기
     function findVariable(names) {
         const vars = ncData.header.variables;
         for (let n of names) {
@@ -159,9 +167,10 @@
                 varInfo.time = findVariable(['time']);
                 varInfo.level = findVariable(['level', 'lev']);
                 
-                lats = Array.from(ncData.getDataVariable(varInfo.lat));
-                lons = Array.from(ncData.getDataVariable(varInfo.lon));
-                times = Array.from(ncData.getDataVariable(varInfo.time));
+                // [오류 해결 1] 모든 축 데이터를 강제로 플랫 배열로 변환
+                lats = flattenArray(ncData.getDataVariable(varInfo.lat));
+                lons = flattenArray(ncData.getDataVariable(varInfo.lon));
+                times = flattenArray(ncData.getDataVariable(varInfo.time));
                 
                 const timeSelect = document.getElementById('timeSelect');
                 timeSelect.innerHTML = '';
@@ -172,7 +181,7 @@
                 });
 
                 if (varInfo.level) {
-                    levels = Array.from(ncData.getDataVariable(varInfo.level));
+                    levels = flattenArray(ncData.getDataVariable(varInfo.level));
                     const levelSelect = document.getElementById('levelSelect');
                     levelSelect.innerHTML = '';
                     levels.forEach((l, idx) => levelSelect.add(new Option(`${l} hPa`, idx)));
@@ -203,7 +212,8 @@
                 const levelIdx = parseInt(document.getElementById('levelSelect').value) || 0;
                 varInfo.data = findVariable(currentDataType === 'HGT' ? ['hgt', 'z'] : ['slp', 'msl', 'prmsl']);
                 
-                const rawData = ncData.getDataVariable(varInfo.data);
+                // [오류 해결 2] 메인 데이터도 플랫 배열로 변환
+                const rawData = flattenArray(ncData.getDataVariable(varInfo.data));
                 const numLats = lats.length;
                 const numLons = lons.length;
                 const numLevels = varInfo.level ? levels.length : 1;
@@ -223,28 +233,21 @@
                 let xArray = [...lons];
                 let zArray = [];
 
-                // 2D 데이터 가공 (비정상 값 검사 로직 대폭 개선)
                 for (let i = 0; i < numLats; i++) {
                     let row = [];
                     for (let j = 0; j < numLons; j++) {
+                        // NCEP 배열 인덱스
                         let idx = varInfo.level 
                             ? (timeIdx * numLevels * numLats * numLons) + (levelIdx * numLats * numLons) + (i * numLons) + j 
                             : (timeIdx * numLats * numLons) + (i * numLons) + j;
                         
-                        let val = Number(rawData[idx]);
-                        let isMissing = false;
-
-                        // 실제 결측치만 정확하게 걸러냄 (101300 같은 기압값을 보존)
-                        if (isNaN(val)) isMissing = true;
-                        if (missingValue !== null && Math.abs(val - missingValue) < 0.1) isMissing = true;
-                        if (val <= -9e30 || val === -32767) isMissing = true;
-
-                        if (isMissing) {
+                        let val = rawData[idx];
+                        
+                        if (isNaN(val) || (missingValue !== null && Math.abs(val - missingValue) < 0.1)) {
                             row.push(null);
                         } else {
                             val = (val * scale) + offset;
-                            // 파스칼 단위(Pa)일 경우 hPa로 변환
-                            if (currentDataType === 'SLP' && val > 2000) val = val / 100;
+                            if (currentDataType === 'SLP' && val > 50000) val = val / 100;
                             row.push(val);
                         }
                     }
@@ -263,26 +266,27 @@
                 if (region === 'global') { lonRange = [0, 360]; latRange = [-90, 90]; }
                 else if (region === 'north_europe') { lonRange = [-10, 40]; latRange = [50, 70]; }
 
-                // 3. 파란색 등압선 설정 (기상청 표준 적용)
-                const contourInterval = currentDataType === 'SLP' ? 4 : 60; // 기압 4hPa, 고도 60m 간격
+                // 파란색 등압선 설정
+                const contourInterval = currentDataType === 'SLP' ? 4 : 60;
                 
                 const contourTrace = {
                     z: zArray, x: xArray, y: yArray,
                     type: 'contour',
+                    colorscale: [[0, '#2563eb'], [1, '#2563eb']], 
                     contours: {
-                        coloring: 'none', // 면 색상 채우기 끔 (배경 지도 노출)
+                        coloring: 'lines',
                         showlabels: true,
-                        labelfont: { family: 'Arial', size: 14, color: 'blue', weight: 'bold' },
-                        size: contourInterval // 등압선 간격 고정
+                        labelfont: { family: 'Arial', size: 14, color: '#1e40af', weight: 'bold' },
+                        size: contourInterval
                     },
-                    line: { color: 'blue', width: 1.5, smoothing: 1.3 }, // 파란색 라운드 선
+                    line: { width: 1.5, smoothing: 1.3 },
                     showscale: false,
                     hovertemplate: '위도: %{y:.1f}°<br>경도: %{x:.1f}°<br>수치: %{z:.1f} <extra></extra>'
                 };
 
-                // 4. 고/저기압(H/L) 극값 마커 생성
+                // 고/저기압 마커
                 let annotations = [];
-                let windowSize = Math.max(2, Math.floor(xArray.length / 25)); // 그리드 해상도에 맞게 유동적 반경 조절
+                let windowSize = Math.max(2, Math.floor(xArray.length / 25)); 
                 
                 for (let i = windowSize; i < yArray.length - windowSize; i+=3) {
                     for (let j = windowSize; j < xArray.length - windowSize; j+=3) {
@@ -303,8 +307,7 @@
                             }
                         }
 
-                        let lon = xArray[j];
-                        let lat = yArray[i];
+                        let lon = xArray[j], lat = yArray[i];
                         let inRegion = (lon >= lonRange[0] && lon <= lonRange[1] && lat >= latRange[0] && lat <= latRange[1]);
 
                         if (inRegion) {
