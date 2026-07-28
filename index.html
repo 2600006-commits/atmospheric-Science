@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>기상청 일기도 분석 시스템</title>
+    <!-- Tailwind CSS (고급스러운 UI/UX) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Plotly.js (그래프 렌더링) -->
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <!-- netcdfjs (NC 파일 파싱) -->
+    <script src="https://cdn.jsdelivr.net/npm/netcdfjs@0.7.0/dist/netcdfjs.min.js"></script>
+    <style>
+        body { font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, 'Helvetica Neue', 'Segoe UI', sans-serif; background-color: #f8fafc; }
+        .glass-panel { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.3); }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="text-slate-800">
+
+<div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- Header -->
+    <header class="mb-8 flex justify-between items-end">
+        <div>
+            <h1 class="text-3xl font-bold text-blue-900 tracking-tight">Meteorological Data Analyzer</h1>
+            <p class="text-slate-500 mt-2">HGT 및 SLP NetCDF 파일 시각화 및 분석</p>
+        </div>
+    </header>
+
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <!-- Sidebar Controls -->
+        <div class="lg:col-span-1 glass-panel rounded-2xl p-6 shadow-sm">
+            <h2 class="text-lg font-semibold mb-4 border-b pb-2">Data Settings</h2>
+            
+            <!-- 1. File Upload -->
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-slate-700 mb-2">1. 데이터 파일 첨부 (.nc)</label>
+                <input type="file" id="fileInput" accept=".nc" class="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 transition">
+            </div>
+
+            <!-- 2. Data Type Selection -->
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-slate-700 mb-2">2. 분석 요소 선택</label>
+                <div class="flex space-x-2">
+                    <button id="btnHGT" class="flex-1 py-2 px-4 rounded-lg font-medium bg-slate-200 text-slate-600 hover:bg-slate-300 transition" onclick="setDataType('HGT')">HGT (지위고도)</button>
+                    <button id="btnSLP" class="flex-1 py-2 px-4 rounded-lg font-medium bg-slate-200 text-slate-600 hover:bg-slate-300 transition" onclick="setDataType('SLP')">SLP (지상기압)</button>
+                </div>
+            </div>
+
+            <!-- 3. Region Selection -->
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-slate-700 mb-2">3. 지역 선택</label>
+                <select id="regionSelect" class="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="global">전세계 (Global)</option>
+                    <option value="east_asia">동아시아 (East Asia)</option>
+                    <option value="north_europe">북유럽 (Northern Europe)</option>
+                </select>
+            </div>
+
+            <!-- 4. Date & Level Selection -->
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-slate-700 mb-2">4. 날짜 및 고도</label>
+                <select id="timeSelect" class="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500 mb-2 disabled:opacity-50">
+                    <option value="">데이터를 먼저 업로드하세요</option>
+                </select>
+                <select id="levelSelect" class="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500 hidden disabled:opacity-50">
+                    <option value="">고도(hPa) 선택</option>
+                </select>
+            </div>
+
+            <button onclick="plotData()" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 transition transform hover:-translate-y-0.5">
+                그래프 그리기
+            </button>
+        </div>
+
+        <!-- Main Plot Area -->
+        <div class="lg:col-span-3 flex flex-col gap-4">
+            <div class="glass-panel rounded-2xl p-2 shadow-sm min-h-[600px] flex items-center justify-center relative">
+                <div id="plotDiv" class="w-full h-full"></div>
+                <div id="loading" class="absolute inset-0 bg-white/80 flex items-center justify-center hidden rounded-2xl z-10">
+                    <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                </div>
+            </div>
+
+            <!-- Gemini Export Button -->
+            <div class="flex justify-end">
+                <button onclick="exportForGemini()" class="bg-gradient-to-r from-purple-500 to-indigo-600 text-white font-semibold py-2 px-6 rounded-lg shadow hover:opacity-90 transition flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                    분석 및 질문 (Gemini용 스크립트 복사)
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentDataType = ''; // 'HGT' or 'SLP'
+    let ncData = null;
+    let lons = [], lats = [], times = [], levels = [];
+
+    // 데이터 타입 토글 UI
+    function setDataType(type) {
+        currentDataType = type;
+        document.getElementById('btnHGT').classList.remove('bg-blue-600', 'text-white');
+        document.getElementById('btnHGT').classList.add('bg-slate-200', 'text-slate-600');
+        document.getElementById('btnSLP').classList.remove('bg-blue-600', 'text-white');
+        document.getElementById('btnSLP').classList.add('bg-slate-200', 'text-slate-600');
+        
+        document.getElementById(`btn${type}`).classList.remove('bg-slate-200', 'text-slate-600');
+        document.getElementById(`btn${type}`).classList.add('bg-blue-600', 'text-white');
+
+        if (type === 'HGT') {
+            document.getElementById('levelSelect').classList.remove('hidden');
+        } else {
+            document.getElementById('levelSelect').classList.add('hidden');
+        }
+    }
+
+    // 파일 업로드 및 파싱
+    document.getElementById('fileInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        document.getElementById('loading').classList.remove('hidden');
+        
+        const reader = new FileReader();
+        reader.onload = function(evt) {
+            try {
+                const data = evt.target.result;
+                ncData = new netcdfjs(data);
+                
+                // 좌표 데이터 추출
+                lats = ncData.getDataVariable('lat');
+                lons = ncData.getDataVariable('lon');
+                times = ncData.getDataVariable('time');
+                
+                // 시간 데이터 처리 (hours since 1800-01-01 -> Date 객체)
+                const timeSelect = document.getElementById('timeSelect');
+                timeSelect.innerHTML = '';
+                const baseDate = new Date('1800-01-01T00:00:00Z');
+                times.forEach((t, idx) => {
+                    let d = new Date(baseDate.getTime() + t * 3600 * 1000);
+                    let option = document.createElement('option');
+                    option.value = idx;
+                    option.text = `${d.getFullYear()}년 ${d.getMonth()+1}월 ${d.getDate()}일`;
+                    timeSelect.add(option);
+                });
+
+                // HGT 파일인 경우 고도(level) 추출
+                if (ncData.hasVariable('level')) {
+                    levels = ncData.getDataVariable('level');
+                    const levelSelect = document.getElementById('levelSelect');
+                    levelSelect.innerHTML = '';
+                    levels.forEach((l, idx) => {
+                        let option = document.createElement('option');
+                        option.value = idx;
+                        option.text = `${l} hPa`;
+                        levelSelect.add(option);
+                    });
+                    setDataType('HGT');
+                } else {
+                    setDataType('SLP');
+                }
+                
+                document.getElementById('loading').classList.add('hidden');
+                alert("파일이 성공적으로 로드되었습니다. '그래프 그리기'를 클릭하세요.");
+            } catch (err) {
+                document.getElementById('loading').classList.add('hidden');
+                alert("파일을 읽는 중 오류가 발생했습니다. 올바른 NetCDF 형식인지 확인하세요.");
+                console.error(err);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    // 데이터 시각화
+    function plotData() {
+        if (!ncData || !currentDataType) {
+            alert("먼저 파일을 업로드하고 분석 요소를 선택하세요.");
+            return;
+        }
+
+        document.getElementById('loading').classList.remove('hidden');
+
+        setTimeout(() => {
+            const timeIdx = parseInt(document.getElementById('timeSelect').value);
+            const varName = currentDataType === 'HGT' ? 'hgt' : 'slp';
+            let zData = [];
+            let titleText = currentDataType === 'HGT' ? '지위 고도 선도 (Geopotential Height)' : '지상 일기도 (Surface Level Pressure)';
+
+            // 데이터 구조에 따른 배열 변환 로직 (단순화된 데모 로직)
+            // 실제 nc 파일의 다차원 배열 구조에 맞게 인덱스를 계산해야 합니다.
+            const rawData = ncData.getDataVariable(varName);
+            const numLats = lats.length;
+            const numLons = lons.length;
+            
+            // 임시: 첫 번째 시간/레벨에 해당하는 2D 배열 생성
+            for (let i = 0; i < numLats; i++) {
+                let row = [];
+                for (let j = 0; j < numLons; j++) {
+                    // 데이터 추출 로직은 실제 차원(Time, Level, Lat, Lon)에 맞게 조정이 필요합니다.
+                    let idx = (timeIdx * numLats * numLons) + (i * numLons) + j;
+                    row.push(rawData[idx]); 
+                }
+                zData.push(row);
+            }
+
+            const region = document.getElementById('regionSelect').value;
+            let lonRange = null; let latRange = null;
+            if (region === 'east_asia') { lonRange = [100, 150]; latRange = [20, 50]; }
+            else if (region === 'north_europe') { lonRange = [-10, 40]; latRange = [50, 70]; }
+
+            const trace = {
+                z: zData,
+                x: lons,
+                y: lats,
+                type: 'contour',
+                colorscale: currentDataType === 'HGT' ? 'Jet' : 'YlGnBu',
+                line: { smoothing: 1.3, width: 2 }, // 부드러운 라운드 처리
+                contours: { showlabels: true, labelfont: { family: 'Pretendard', size: 12, color: 'black' } },
+                hovertemplate: '위도: %{y:.1f}°<br>경도: %{x:.1f}°<br>수치: %{z:.1f}<extra></extra>' // 실시간 마우스 오버 수치
+            };
+
+            const layout = {
+                title: { text: titleText, font: { size: 20, bold: true } },
+                xaxis: { title: '경도 (Longitude)', range: lonRange },
+                yaxis: { title: '위도 (Latitude)', range: latRange },
+                margin: { l: 50, r: 50, b: 50, t: 60 },
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent'
+            };
+
+            Plotly.newPlot('plotDiv', [trace], layout);
+            document.getElementById('loading').classList.add('hidden');
+        }, 100);
+    }
+
+    // 제미나이 연동을 위한 함수
+    function exportForGemini() {
+        const plot = document.getElementById('plotDiv');
+        if (!plot.data) {
+            alert("먼저 그래프를 생성해주세요.");
+            return;
+        }
+
+        // 프롬프트 클립보드 복사
+        const dateStr = document.getElementById('timeSelect').options[document.getElementById('timeSelect').selectedIndex].text;
+        const promptText = `[제미나이 프롬프트]\n첨부한 ${dateStr} 기준의 ${currentDataType} 그래프 이미지를 바탕으로 다음을 분석해 줘:\n1. 현재 해당 지역의 전반적인 기상 상황 해석\n2. 기압계나 고도장의 주요 특징 (고기압/저기압의 위치 등)\n3. 이로 인해 예상되는 날씨 변화`;
+
+        navigator.clipboard.writeText(promptText).then(() => {
+            // 이미지 다운로드
+            Plotly.downloadImage(plot, {format: 'png', width: 800, height: 600, filename: `${currentDataType}_Graph`});
+            alert("질문 스크립트가 클립보드에 복사되었고, 그래프 이미지가 다운로드 되었습니다!\n\n제미나이 채팅창에 이미지를 첨부하고 복사된 텍스트를 붙여넣기 하세요.");
+        }).catch(err => {
+            console.error('클립보드 복사 실패:', err);
+            alert("클립보드 복사에 실패했습니다.");
+        });
+    }
+</script>
+</body>
+</html>
