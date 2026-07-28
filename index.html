@@ -214,9 +214,19 @@
                     throw new Error("NetCDF 파일로 인식되지 않습니다. 확장자와 포맷을 확인해주세요.");
                 }
 
-                // [수정] netcdfjs 0.4+ 버전은 default export가 제거되어
-                // new netcdfjs(...) 가 아니라 new netcdfjs.NetCDFReader(...) 로 생성해야 함.
-                ncData = new netcdfjs.NetCDFReader(buffer);
+                // netcdfjs는 버전에 따라 생성자 노출 방식이 다름
+                // - 0.x 버전(현재 CDN에 로드된 0.7.0 포함): default export → new netcdfjs(buffer)
+                // - 2.0.0 이상: named export → new netcdfjs.NetCDFReader(buffer)
+                // 두 경우를 모두 시도해서 어떤 버전이 로드되어도 동작하도록 함.
+                if (typeof netcdfjs === 'function') {
+                    ncData = new netcdfjs(buffer);
+                } else if (netcdfjs && typeof netcdfjs.NetCDFReader === 'function') {
+                    ncData = new netcdfjs.NetCDFReader(buffer);
+                } else if (netcdfjs && typeof netcdfjs.default === 'function') {
+                    ncData = new netcdfjs.default(buffer);
+                } else {
+                    throw new Error("netcdfjs 라이브러리를 초기화할 수 없습니다. 스크립트 로드 상태를 확인해주세요.");
+                }
 
                 varInfo.lat = findVariable(['lat', 'latitude']);
                 varInfo.lon = findVariable(['lon', 'longitude']);
@@ -267,6 +277,14 @@
                     <div><b>변수 목록:</b> ${ncData.header.variables.map(v => v.name).join(', ')}</div>
                 `;
 
+                // [자동화 1] 위/경도 범위를 보고 전지구 자료면 지역을 'global'로 자동 전환
+                autoSelectRegion();
+
+                // [자동화 2] 파일을 첨부하면 버튼 클릭 없이 바로 일기도를 그림 (첫 시간 스텝 기준)
+                document.getElementById('timeSelect').selectedIndex = 0;
+                if (varInfo.level) document.getElementById('levelSelect').selectedIndex = 0;
+                plotData();
+
             } catch (err) {
                 alert("오류: " + err.message);
                 console.error(err);
@@ -275,6 +293,18 @@
             }
         };
         reader.readAsArrayBuffer(file);
+    }
+
+    // 위/경도 데이터 범위를 보고 동아시아 확대 화면이 아닌 전지구 화면이 맞는지 자동 판단
+    function autoSelectRegion() {
+        if (!lons.length || !lats.length) return;
+        const lonMin = Math.min(...lons), lonMax = Math.max(...lons);
+        const latMin = Math.min(...lats), latMax = Math.max(...lats);
+        const regionSelect = document.getElementById('regionSelect');
+        // 경도 범위가 300도 이상(전지구 격자)이면 global, 아니면 기존 선택 유지
+        if ((lonMax - lonMin) >= 300 || (latMax - latMin) >= 150) {
+            regionSelect.value = 'global';
+        }
     }
 
     document.getElementById('fileInput').addEventListener('change', function(e) {
