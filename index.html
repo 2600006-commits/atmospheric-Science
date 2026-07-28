@@ -86,7 +86,7 @@
 <script>
     let currentDataType = ''; 
     let ncData = null;
-    let mapTraceData = null; // 지도 윤곽선 데이터 캐싱
+    let mapTraceData = null;
     let lons = [], lats = [], times = [], levels = [];
     let varInfo = { lat: '', lon: '', time: '', level: '', data: '' };
 
@@ -98,7 +98,7 @@
         document.getElementById('levelSelect').style.display = type === 'HGT' ? 'block' : 'none';
     }
 
-    // 1. 세계 지도 윤곽선 (GeoJSON) 불러오기 함수
+    // 1. 세계 지도 윤곽선 불러오기 (날짜 변경선 버그 수정 완비)
     async function fetchMapLine() {
         if (mapTraceData) return mapTraceData;
         try {
@@ -108,32 +108,33 @@
             
             geojson.features.forEach(f => {
                 const extractPoly = (poly) => {
+                    let prevLon = null;
                     poly.forEach(coord => {
                         let lon = coord[0];
-                        if(lon < 0) lon += 360; // 기상청 NCEP 데이터 형식(0~360)에 맞게 경도 보정
-                        mapX.push(lon); 
-                        mapY.push(coord[1]);
+                        if (lon < 0) lon += 360; 
+                        
+                        // 지도가 화면 끝에서 반대편으로 선이 그어지는 현상 방지
+                        if (prevLon !== null && Math.abs(lon - prevLon) > 180) {
+                            mapX.push(null); mapY.push(null);
+                        }
+                        mapX.push(lon); mapY.push(coord[1]);
+                        prevLon = lon;
                     });
-                    mapX.push(null); mapY.push(null); // 선 끊기
+                    mapX.push(null); mapY.push(null); 
                 };
                 if(f.geometry.type === 'Polygon') f.geometry.coordinates.forEach(extractPoly);
                 else if(f.geometry.type === 'MultiPolygon') f.geometry.coordinates.forEach(m => m.forEach(extractPoly));
             });
 
-            mapTraceData = {
-                x: mapX, y: mapY,
-                type: 'scatter', mode: 'lines',
-                line: { color: '#333333', width: 1 },
-                hoverinfo: 'none', showlegend: false
-            };
+            mapTraceData = { x: mapX, y: mapY, type: 'scatter', mode: 'lines', line: { color: '#475569', width: 1 }, hoverinfo: 'none', showlegend: false };
             return mapTraceData;
         } catch (e) {
-            console.warn("지도 윤곽선을 불러오지 못했습니다.", e);
+            console.warn("지도 로드 실패", e);
             return null;
         }
     }
 
-    // 2. 변수 이름 유연하게 찾기 (xarray 변환 대응)
+    // 2. 변수 탐색기
     function findVariable(names) {
         const vars = ncData.header.variables;
         for (let n of names) {
@@ -148,7 +149,7 @@
         if (!file) return;
 
         document.getElementById('loading').classList.remove('hidden');
-        document.getElementById('loadingText').innerText = "파일을 파싱 중입니다...";
+        document.getElementById('loadingText').innerText = "파일을 해독 중입니다...";
         
         const reader = new FileReader();
         reader.onload = function(evt) {
@@ -160,9 +161,9 @@
                 varInfo.time = findVariable(['time']);
                 varInfo.level = findVariable(['level', 'lev']);
                 
-                lats = ncData.getDataVariable(varInfo.lat);
-                lons = ncData.getDataVariable(varInfo.lon);
-                times = ncData.getDataVariable(varInfo.time);
+                lats = Array.from(ncData.getDataVariable(varInfo.lat));
+                lons = Array.from(ncData.getDataVariable(varInfo.lon));
+                times = Array.from(ncData.getDataVariable(varInfo.time));
                 
                 const timeSelect = document.getElementById('timeSelect');
                 timeSelect.innerHTML = '';
@@ -173,7 +174,7 @@
                 });
 
                 if (varInfo.level) {
-                    levels = ncData.getDataVariable(varInfo.level);
+                    levels = Array.from(ncData.getDataVariable(varInfo.level));
                     const levelSelect = document.getElementById('levelSelect');
                     levelSelect.innerHTML = '';
                     levels.forEach((l, idx) => levelSelect.add(new Option(`${l} hPa`, idx)));
@@ -182,9 +183,9 @@
                     setDataType('SLP');
                 }
                 
-                alert("파일이 로드되었습니다. '일기도 그리기'를 클릭하세요.");
+                alert("파일이 로드되었습니다! 이제 '일기도 그리기' 버튼을 클릭하세요.");
             } catch (err) {
-                alert("파일 파싱 오류: " + err.message);
+                alert("오류: " + err.message);
             } finally {
                 document.getElementById('loading').classList.add('hidden');
             }
@@ -192,12 +193,11 @@
         reader.readAsArrayBuffer(file);
     });
 
-    // 3. 메인 일기도 렌더링 함수
     async function plotData() {
         if (!ncData || !currentDataType) return alert("파일을 먼저 업로드하세요.");
         
         document.getElementById('loading').classList.remove('hidden');
-        document.getElementById('loadingText').innerText = "지도와 일기도를 합성 중입니다...";
+        document.getElementById('loadingText').innerText = "기상청 스타일로 렌더링 중입니다...";
 
         setTimeout(async () => {
             try {
@@ -210,92 +210,132 @@
                 const numLons = lons.length;
                 const numLevels = varInfo.level ? levels.length : 1;
 
-                let zData = [];
+                // 데이터 압축 계수 읽기
+                let scale = 1, offset = 0, missingValue = null;
+                const varObj = ncData.header.variables.find(v => v.name === varInfo.data);
+                if (varObj && varObj.attributes) {
+                    varObj.attributes.forEach(attr => {
+                        let val = Array.isArray(attr.value) ? attr.value[0] : attr.value;
+                        if (attr.name === 'scale_factor') scale = Number(val);
+                        if (attr.name === 'add_offset') offset = Number(val);
+                        if (attr.name === 'missing_value') missingValue = Number(val);
+                    });
+                }
+
+                let yArray = [...lats];
+                let xArray = [...lons];
+                let zArray = [];
+
+                // 데이터 2D 추출 및 파스칼 단위 보호 로직
                 for (let i = 0; i < numLats; i++) {
                     let row = [];
                     for (let j = 0; j < numLons; j++) {
-                        // NCEP 배열 구조 매핑
                         let idx = varInfo.level 
                             ? (timeIdx * numLevels * numLats * numLons) + (levelIdx * numLats * numLons) + (i * numLons) + j 
                             : (timeIdx * numLats * numLons) + (i * numLons) + j;
                         
-                        let val = rawData[idx];
-                        // 결측치 필터링 및 단위 보정 (Pa -> hPa)
-                        if (isNaN(val) || val <= -32000 || val >= 32000) val = null;
-                        else if (currentDataType === 'SLP' && val > 1500) val = val / 100;
-                        row.push(val);
+                        let val = Number(rawData[idx]);
+                        
+                        // 결측치 필터 (극단적인 NaN 값만 제거하여 Pa 단위 보존)
+                        if (isNaN(val) || val === missingValue || val <= -9e30 || val >= 9e30) {
+                            row.push(null);
+                        } else {
+                            val = (val * scale) + offset;
+                            if (currentDataType === 'SLP' && val > 2000) val = val / 100; // Pa를 hPa로
+                            row.push(val);
+                        }
                     }
-                    zData.push(row);
+                    zArray.push(row);
                 }
 
-                // 4. 지도 배경 생성
+                // Plotly 등압선 오류 방지 (위도 역순일 경우 정렬)
+                if (yArray[0] > yArray[yArray.length - 1]) {
+                    yArray.reverse();
+                    zArray.reverse();
+                }
+
                 const mapTrace = await fetchMapLine();
 
-                // 5. 등압선(Contour) 생성 (첨부 이미지 스타일 적용)
+                // 3. 기상청 스타일 파란색 등압선(Contour) 설정
+                const contourInterval = currentDataType === 'SLP' ? 4 : 60; // 기압은 4hPa, 고도는 60m 간격
+                const contourStart = currentDataType === 'SLP' ? 900 : 4000;
+                const contourEnd = currentDataType === 'SLP' ? 1100 : 6000;
+
                 const contourTrace = {
-                    z: zData,
-                    x: lons,
-                    y: lats,
+                    z: zArray, x: xArray, y: yArray,
                     type: 'contour',
-                    colorscale: [[0, 'blue'], [1, 'blue']], // 선 색상을 파란색으로 통일
+                    colorscale: [[0, '#2563eb'], [1, '#2563eb']], // 올 블루
                     contours: {
-                        coloring: 'lines', // 면 채우기 없이 선만 표시
-                        showlabels: true,
-                        labelfont: { family: 'Arial', size: 13, color: 'blue' }
+                        coloring: 'lines', // 면 채우기 끔
+                        showlabels: true, // 수치 표시
+                        labelfont: { family: 'Arial', size: 14, color: '#1e40af', weight: 'bold' },
+                        start: contourStart, end: contourEnd, size: contourInterval // 정확한 간격 세팅
                     },
-                    line: { width: 1.5, smoothing: 1.3 },
-                    showscale: false, // 컬러바 숨김
+                    line: { width: 2, smoothing: 1.3 }, // 매끄러운 라운드 선
+                    showscale: false,
                     hovertemplate: '위도: %{y:.1f}°<br>경도: %{x:.1f}°<br>수치: %{z:.1f} <extra></extra>'
                 };
 
-                // 6. H(고기압) / L(저기압) 극값 마커 생성
+                // 4. 고/저기압(H/L) 극값 자동 탐색 및 마커 부착
                 let annotations = [];
-                let windowSize = 5; // 극값을 찾는 반경 크기
-                for (let i = windowSize; i < numLats - windowSize; i++) {
-                    for (let j = windowSize; j < numLons - windowSize; j++) {
-                        let val = zData[i][j];
+                let windowSize = 8; // 극값 탐색 반경 (중복 표시 방지용)
+                
+                for (let i = windowSize; i < yArray.length - windowSize; i+=3) {
+                    for (let j = windowSize; j < xArray.length - windowSize; j+=3) {
+                        let val = zArray[i][j];
                         if (val === null) continue;
 
                         let isMax = true, isMin = true;
                         for(let wi = -windowSize; wi <= windowSize; wi++) {
                             for(let wj = -windowSize; wj <= windowSize; wj++) {
                                 if (wi===0 && wj===0) continue;
-                                let nVal = zData[i+wi][j+wj];
+                                let nVal = zArray[i+wi][j+wj];
                                 if (nVal === null) continue;
                                 if (val <= nVal) isMax = false;
                                 if (val >= nVal) isMin = false;
                             }
                         }
 
-                        if (isMax) {
-                            annotations.push({ x: lons[j], y: lats[i], text: '<b style="color:blue;font-size:26px;">H</b><br><span style="color:blue;font-size:14px;">' + Math.round(val) + '</span>', showarrow: false });
-                        } else if (isMin) {
-                            annotations.push({ x: lons[j], y: lats[i], text: '<b style="color:red;font-size:26px;">L</b><br><span style="color:red;font-size:14px;">' + Math.round(val) + '</span>', showarrow: false });
+                        // 기상청과 똑같이 파란색 H, 빨간색 L 표기
+                        if (isMax && (currentDataType !== 'SLP' || val > 1000)) {
+                            annotations.push({
+                                x: xArray[j], y: yArray[i],
+                                text: `<b style="color:#1d4ed8;font-size:26px;">H</b><br><span style="color:#1d4ed8;font-size:14px;font-weight:bold;">${Math.round(val)}</span>`,
+                                showarrow: false
+                            });
+                            j += windowSize;
+                        } else if (isMin && (currentDataType !== 'SLP' || val < 1016)) {
+                            annotations.push({
+                                x: xArray[j], y: yArray[i],
+                                text: `<b style="color:#dc2626;font-size:26px;">L</b><br><span style="color:#dc2626;font-size:14px;font-weight:bold;">${Math.round(val)}</span>`,
+                                showarrow: false
+                            });
+                            j += windowSize;
                         }
                     }
                 }
 
-                // 7. 지역 범위 및 레이아웃 설정
+                // 5. 지역 줌인 
                 const region = document.getElementById('regionSelect').value;
-                let lonRange = [100, 150], latRange = [20, 50]; // 기본: 동아시아
+                let lonRange = [100, 150], latRange = [20, 50]; 
                 if (region === 'global') { lonRange = [0, 360]; latRange = [-90, 90]; }
                 else if (region === 'north_europe') { lonRange = [-10, 40]; latRange = [50, 70]; }
 
                 const layout = {
                     title: { text: currentDataType === 'HGT' ? '지위 고도 선도 (Geopotential Height)' : '지상 일기도 (Surface Pressure)', font: { size: 22, bold: true } },
-                    xaxis: { title: '경도', range: lonRange },
-                    yaxis: { title: '위도', range: latRange, scaleanchor: 'x', scaleratio: 1 }, // 실제 지도 비율 유지
-                    margin: { l: 40, r: 40, b: 40, t: 60 },
+                    xaxis: { title: '경도 (Longitude)', range: lonRange, showgrid: true, gridcolor: '#e2e8f0' },
+                    yaxis: { title: '위도 (Latitude)', range: latRange, scaleanchor: 'x', scaleratio: 1, showgrid: true, gridcolor: '#e2e8f0' }, // scaleanchor로 지도 비율(찌그러짐 방지) 고정
+                    margin: { l: 50, r: 50, b: 50, t: 80 },
                     paper_bgcolor: 'white',
-                    plot_bgcolor: '#fcfcfc', // 바다 배경색 살짝 추가
-                    annotations: annotations // H, L 마커 삽입
+                    plot_bgcolor: '#f8fafc',
+                    annotations: annotations
                 };
 
-                const plotDataArray = mapTrace ? [mapTrace, contourTrace] : [contourTrace];
+                const plotDataArray = mapTrace ? [contourTrace, mapTrace] : [contourTrace];
                 Plotly.newPlot('plotDiv', plotDataArray, layout);
 
             } catch (err) {
-                alert("일기도 생성 오류: " + err.message);
+                alert("일기도 렌더링 오류: " + err.message);
                 console.error(err);
             } finally {
                 document.getElementById('loading').classList.add('hidden');
@@ -311,7 +351,7 @@
         const promptText = `첨부한 ${dateStr} 기준의 ${currentDataType} 일기도 이미지를 바탕으로 다음을 분석해 줘:\n1. 현재 해당 지역의 전반적인 기상 상황 해석\n2. 기압계나 고도장의 주요 특징 (H, L 기압 중심 위치 등)\n3. 이로 인해 예상되는 날씨 변화`;
 
         navigator.clipboard.writeText(promptText).then(() => {
-            Plotly.downloadImage(plot, {format: 'png', width: 900, height: 700, filename: `KMA_Map_${currentDataType}`});
+            Plotly.downloadImage(plot, {format: 'png', width: 1000, height: 800, filename: `KMA_Map_${currentDataType}`});
             alert("✅ 질문 스크립트가 복사되었고 일기도가 다운로드 되었습니다!\n제미나이 채팅창에 이미지를 첨부하고 Ctrl+V (붙여넣기) 하세요.");
         });
     }
