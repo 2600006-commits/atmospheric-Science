@@ -134,10 +134,10 @@
                 lons = ncData.getDataVariable('lon');
                 times = ncData.getDataVariable('time');
                 
-                // 시간 데이터 처리 (hours since 1800-01-01 -> Date 객체)
+                // 시간 데이터 처리
                 const timeSelect = document.getElementById('timeSelect');
                 timeSelect.innerHTML = '';
-                const baseDate = new Date('1800-01-01T00:00:00Z');
+                const baseDate = new Date('1800-01-01T00:00:00Z'); // 기상 데이터 기준일
                 times.forEach((t, idx) => {
                     let d = new Date(baseDate.getTime() + t * 3600 * 1000);
                     let option = document.createElement('option');
@@ -166,14 +166,14 @@
                 alert("파일이 성공적으로 로드되었습니다. '그래프 그리기'를 클릭하세요.");
             } catch (err) {
                 document.getElementById('loading').classList.add('hidden');
-                alert("파일을 읽는 중 오류가 발생했습니다. 올바른 NetCDF 형식인지 확인하세요.");
+                alert("파일을 읽는 중 오류가 발생했습니다. 변환된 _v3.nc 파일이 맞는지 확인하세요.");
                 console.error(err);
             }
         };
         reader.readAsArrayBuffer(file);
     });
 
-    // 데이터 시각화
+    // 데이터 시각화 (인덱싱 및 압축해제 완벽 적용)
     function plotData() {
         if (!ncData || !currentDataType) {
             alert("먼저 파일을 업로드하고 분석 요소를 선택하세요.");
@@ -183,59 +183,95 @@
         document.getElementById('loading').classList.remove('hidden');
 
         setTimeout(() => {
-            const timeIdx = parseInt(document.getElementById('timeSelect').value);
-            const varName = currentDataType === 'HGT' ? 'hgt' : 'slp';
-            let zData = [];
-            let titleText = currentDataType === 'HGT' ? '지위 고도 선도 (Geopotential Height)' : '지상 일기도 (Surface Level Pressure)';
+            try {
+                const timeIdx = parseInt(document.getElementById('timeSelect').value);
+                const levelIdx = parseInt(document.getElementById('levelSelect').value) || 0;
+                const varName = currentDataType === 'HGT' ? 'hgt' : 'slp';
+                
+                const rawData = ncData.getDataVariable(varName);
+                const numLats = lats.length;
+                const numLons = lons.length;
+                const numLevels = (currentDataType === 'HGT' && levels.length > 0) ? levels.length : 1;
 
-            // 데이터 구조에 따른 배열 변환 로직 (단순화된 데모 로직)
-            // 실제 nc 파일의 다차원 배열 구조에 맞게 인덱스를 계산해야 합니다.
-            const rawData = ncData.getDataVariable(varName);
-            const numLats = lats.length;
-            const numLons = lons.length;
-            
-            // 임시: 첫 번째 시간/레벨에 해당하는 2D 배열 생성
-            for (let i = 0; i < numLats; i++) {
-                let row = [];
-                for (let j = 0; j < numLons; j++) {
-                    // 데이터 추출 로직은 실제 차원(Time, Level, Lat, Lon)에 맞게 조정이 필요합니다.
-                    let idx = (timeIdx * numLats * numLons) + (i * numLons) + j;
-                    row.push(rawData[idx]); 
+                // NCEP 데이터 스케일링(압축 해제) 속성 읽기
+                let scale = 1, offset = 0, missingValue = null;
+                const varObj = ncData.header.variables.find(v => v.name === varName);
+                if (varObj && varObj.attributes) {
+                    varObj.attributes.forEach(attr => {
+                        if (attr.name === 'scale_factor') scale = attr.value;
+                        if (attr.name === 'add_offset') offset = attr.value;
+                        if (attr.name === 'missing_value') missingValue = attr.value;
+                    });
                 }
-                zData.push(row);
+
+                // 2D 배열 매핑
+                let zData = [];
+                for (let i = 0; i < numLats; i++) {
+                    let row = [];
+                    for (let j = 0; j < numLons; j++) {
+                        let idx = 0;
+                        if (currentDataType === 'HGT') {
+                            // HGT는 4차원: [Time, Level, Lat, Lon]
+                            idx = (timeIdx * numLevels * numLats * numLons) + (levelIdx * numLats * numLons) + (i * numLons) + j;
+                        } else {
+                            // SLP는 3차원: [Time, Lat, Lon]
+                            idx = (timeIdx * numLats * numLons) + (i * numLons) + j;
+                        }
+                        
+                        let rawVal = rawData[idx];
+                        
+                        // 결측치(육지/에러값) 처리 (하얗게 날아가는 현상 방지)
+                        if (rawVal === missingValue || rawVal <= -32767 || rawVal >= 32766) {
+                            row.push(null);
+                        } else {
+                            // 압축 해제 공식 적용
+                            let val = (rawVal * scale) + offset;
+                            // SLP 단위 변환 (Pascals -> hPa)
+                            if (currentDataType === 'SLP') val = val / 100;
+                            row.push(val);
+                        }
+                    }
+                    zData.push(row);
+                }
+
+                // 지역 줌인 설정
+                const region = document.getElementById('regionSelect').value;
+                let lonRange = null; let latRange = null;
+                if (region === 'east_asia') { lonRange = [100, 150]; latRange = [20, 50]; }
+                else if (region === 'north_europe') { lonRange = [-10, 40]; latRange = [50, 70]; }
+
+                // 그래프 생성 옵션
+                const trace = {
+                    z: zData,
+                    x: lons,
+                    y: lats,
+                    type: 'contour',
+                    colorscale: currentDataType === 'HGT' ? 'Jet' : 'YlGnBu',
+                    line: { smoothing: 1.3, width: 2 },
+                    contours: { showlabels: true, labelfont: { family: 'Pretendard', size: 12, color: 'black' } },
+                    hovertemplate: '위도: %{y:.1f}°<br>경도: %{x:.1f}°<br>수치: %{z:.1f} <extra></extra>'
+                };
+
+                const layout = {
+                    title: { text: currentDataType === 'HGT' ? '지위 고도 선도 (Geopotential Height)' : '지상 일기도 (Surface Level Pressure)', font: { size: 20, bold: true } },
+                    xaxis: { title: '경도 (Longitude)', range: lonRange },
+                    yaxis: { title: '위도 (Latitude)', range: latRange },
+                    margin: { l: 50, r: 50, b: 50, t: 60 },
+                    paper_bgcolor: 'transparent',
+                    plot_bgcolor: 'transparent'
+                };
+
+                Plotly.newPlot('plotDiv', [trace], layout);
+            } catch (err) {
+                console.error(err);
+                alert("그래프를 그리는 중 오류가 발생했습니다. 데이터 배열 규격을 확인하세요.");
+            } finally {
+                document.getElementById('loading').classList.add('hidden');
             }
-
-            const region = document.getElementById('regionSelect').value;
-            let lonRange = null; let latRange = null;
-            if (region === 'east_asia') { lonRange = [100, 150]; latRange = [20, 50]; }
-            else if (region === 'north_europe') { lonRange = [-10, 40]; latRange = [50, 70]; }
-
-            const trace = {
-                z: zData,
-                x: lons,
-                y: lats,
-                type: 'contour',
-                colorscale: currentDataType === 'HGT' ? 'Jet' : 'YlGnBu',
-                line: { smoothing: 1.3, width: 2 }, // 부드러운 라운드 처리
-                contours: { showlabels: true, labelfont: { family: 'Pretendard', size: 12, color: 'black' } },
-                hovertemplate: '위도: %{y:.1f}°<br>경도: %{x:.1f}°<br>수치: %{z:.1f}<extra></extra>' // 실시간 마우스 오버 수치
-            };
-
-            const layout = {
-                title: { text: titleText, font: { size: 20, bold: true } },
-                xaxis: { title: '경도 (Longitude)', range: lonRange },
-                yaxis: { title: '위도 (Latitude)', range: latRange },
-                margin: { l: 50, r: 50, b: 50, t: 60 },
-                paper_bgcolor: 'transparent',
-                plot_bgcolor: 'transparent'
-            };
-
-            Plotly.newPlot('plotDiv', [trace], layout);
-            document.getElementById('loading').classList.add('hidden');
         }, 100);
     }
 
-    // 제미나이 연동을 위한 함수
+    // 제미나이 연동
     function exportForGemini() {
         const plot = document.getElementById('plotDiv');
         if (!plot.data) {
@@ -243,16 +279,14 @@
             return;
         }
 
-        // 프롬프트 클립보드 복사
         const dateStr = document.getElementById('timeSelect').options[document.getElementById('timeSelect').selectedIndex].text;
         const promptText = `[제미나이 프롬프트]\n첨부한 ${dateStr} 기준의 ${currentDataType} 그래프 이미지를 바탕으로 다음을 분석해 줘:\n1. 현재 해당 지역의 전반적인 기상 상황 해석\n2. 기압계나 고도장의 주요 특징 (고기압/저기압의 위치 등)\n3. 이로 인해 예상되는 날씨 변화`;
 
         navigator.clipboard.writeText(promptText).then(() => {
-            // 이미지 다운로드
             Plotly.downloadImage(plot, {format: 'png', width: 800, height: 600, filename: `${currentDataType}_Graph`});
-            alert("질문 스크립트가 클립보드에 복사되었고, 그래프 이미지가 다운로드 되었습니다!\n\n제미나이 채팅창에 이미지를 첨부하고 복사된 텍스트를 붙여넣기 하세요.");
+            alert("질문 스크립트가 복사되었고 이미지가 다운로드 되었습니다!\n제미나이 창에 이미지를 첨부하고 Ctrl+V 하세요.");
         }).catch(err => {
-            console.error('클립보드 복사 실패:', err);
+            console.error(err);
             alert("클립보드 복사에 실패했습니다.");
         });
     }
