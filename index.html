@@ -146,8 +146,10 @@
                     timeSelect.add(option);
                 });
 
-                // HGT 파일인 경우 고도(level) 추출
-                if (ncData.hasVariable('level')) {
+                // [에러 해결 부분] 존재하지 않는 함수 대신 실제 헤더 배열을 검사하도록 수정
+                const hasLevel = ncData.header.variables.some(v => v.name === 'level');
+                
+                if (hasLevel) {
                     levels = ncData.getDataVariable('level');
                     const levelSelect = document.getElementById('levelSelect');
                     levelSelect.innerHTML = '';
